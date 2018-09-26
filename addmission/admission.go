@@ -9,7 +9,9 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/filters"
 	"k8s.io/kubernetes/pkg/util/slice"
 	"kubesphere.io/caddy-plugin/addmission/informer"
-	"errors"
+	"fmt"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 type Admission struct {
@@ -46,12 +48,18 @@ func (c Admission) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error
 		err := admit(attrs)
 
 		if err != nil {
-			return http.StatusForbidden, err
+			return handleForbidden(w, r, err.Error()), nil
 		}
 
 	}
 
 	return c.Next.ServeHTTP(w, r)
+}
+
+func handleForbidden(w http.ResponseWriter, r *http.Request, reason string) int {
+	message := fmt.Sprintf("Forbidden,%s", reason)
+	w.Header().Add("WWW-Authenticate", message)
+	return http.StatusForbidden
 }
 
 func admit(attrs authorizer.Attributes) error {
@@ -64,7 +72,7 @@ func admit(attrs authorizer.Attributes) error {
 		return nil
 	}
 
-	return errors.New("permission undefined")
+	return errors.NewForbidden(schema.GroupResource{Group: attrs.GetAPIGroup(), Resource: attrs.GetResource()}, attrs.GetName(), fmt.Errorf("permission undefined"))
 }
 func roleCheck(attrs authorizer.Attributes) bool {
 
@@ -127,7 +135,7 @@ func clusterRoleCheck(attrs authorizer.Attributes) bool {
 					if verbValidate(clusterRole.Rules, attrs.GetAPIGroup(), "", attrs.GetResource(), attrs.GetName(), attrs.GetVerb()) {
 						return true
 					}
-				} else if verbValidate(clusterRole.Rules, attrs.GetAPIGroup(), attrs.GetPath(), "", "", attrs.GetVerb()) {
+				} else if verbValidate(clusterRole.Rules, "", attrs.GetPath(), "", "", attrs.GetVerb()) {
 					return true
 				}
 
@@ -140,19 +148,29 @@ func clusterRoleCheck(attrs authorizer.Attributes) bool {
 
 func verbValidate(rules []v1.PolicyRule, apiGroup string, nonResourceURL string, resource string, resourceName string, verb string) bool {
 	for _, rule := range rules {
-		if slice.ContainsString(rule.APIGroups, apiGroup, nil) || slice.ContainsString(rule.APIGroups, v1.APIGroupAll, nil) {
-			if slice.ContainsString(rule.Verbs, verb, nil) || slice.ContainsString(rule.Verbs, v1.VerbAll, nil) {
-				if nonResourceURL == "" {
-					if slice.ContainsString(rule.Resources, resource, nil) || slice.ContainsString(rule.Resources, v1.ResourceAll, nil) {
+
+		if nonResourceURL == "" {
+			if slice.ContainsString(rule.APIGroups, apiGroup, nil) ||
+				slice.ContainsString(rule.APIGroups, v1.APIGroupAll, nil) {
+				if slice.ContainsString(rule.Verbs, verb, nil) ||
+					slice.ContainsString(rule.Verbs, v1.VerbAll, nil) {
+					if slice.ContainsString(rule.Resources, resource, nil) ||
+						slice.ContainsString(rule.Resources, v1.ResourceAll, nil) {
 						if resourceName == "" {
 							return true
-						} else if slice.ContainsString(rule.ResourceNames, resourceName, nil) || slice.ContainsString(rule.Resources, v1.ResourceAll, nil) {
+						} else if slice.ContainsString(rule.ResourceNames, resourceName, nil) ||
+							slice.ContainsString(rule.Resources, v1.ResourceAll, nil) {
 							return true
 						}
 					}
-				} else if slice.ContainsString(rule.NonResourceURLs, nonResourceURL, nil) || slice.ContainsString(rule.NonResourceURLs, v1.NonResourceAll, nil) {
-					return true
 				}
+			}
+
+		} else if slice.ContainsString(rule.NonResourceURLs, nonResourceURL, nil) ||
+			slice.ContainsString(rule.NonResourceURLs, v1.NonResourceAll, nil) {
+			if slice.ContainsString(rule.Verbs, verb, nil) ||
+				slice.ContainsString(rule.Verbs, v1.VerbAll, nil) {
+				return true
 			}
 		}
 	}

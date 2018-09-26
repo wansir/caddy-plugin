@@ -160,7 +160,6 @@ func validate(uToken string) (*jwt.Token, error) {
 func handleUnauthorized(w http.ResponseWriter, r *http.Request, reason string) int {
 	message := fmt.Sprintf("Unauthorized,%s", reason)
 	w.Header().Add("WWW-Authenticate", message)
-	fmt.Println("auth failed " + r.URL.Path)
 	return http.StatusUnauthorized
 }
 

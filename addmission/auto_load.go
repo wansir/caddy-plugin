@@ -2,8 +2,9 @@ package admission
 
 import (
 	"github.com/mholt/caddy"
-	"github.com/mholt/caddy/caddyhttp/httpserver"
 	"kubesphere.io/caddy-plugin/addmission/informer"
+	"fmt"
+	"github.com/mholt/caddy/caddyhttp/httpserver"
 )
 
 func init() {
@@ -28,6 +29,11 @@ func Setup(c *caddy.Controller) error {
 	if err != nil {
 		return err
 	}
+
+	c.OnStartup(func() error {
+		fmt.Println("Admission middleware is initiated")
+		return nil
+	})
 
 	httpserver.GetConfig(c).AddMiddleware(func(next httpserver.Handler) httpserver.Handler {
 		return &Admission{Next: next, Rules: rules}
