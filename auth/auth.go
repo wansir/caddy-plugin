@@ -30,6 +30,8 @@ type User struct {
 	Extra    *map[string]interface{} `json:"extra,omitempty"`
 }
 
+const jenkinsAPIBase = "/apis/jenkins.kubesphere.io"
+
 var requestInfoFactory = request.RequestInfoFactory{
 	APIPrefixes:          sets.NewString("api", "apis"),
 	GrouplessAPIPrefixes: sets.NewString("api")}
@@ -65,7 +67,7 @@ func (h *Auth) ServeHTTP(resp http.ResponseWriter, req *http.Request) (int, erro
 				return handleUnauthorized(resp, req, err.Error()), nil
 			}
 
-			r, err := injectContext(token, req)
+			r, err := injectContext(uToken, token, req)
 
 			if err != nil {
 				return handleUnauthorized(resp, req, err.Error()), nil
@@ -78,7 +80,7 @@ func (h *Auth) ServeHTTP(resp http.ResponseWriter, req *http.Request) (int, erro
 	return h.Next.ServeHTTP(resp, req)
 }
 
-func injectContext(token *jwt.Token, req *http.Request) (*http.Request, error) {
+func injectContext(uToken string, token *jwt.Token, req *http.Request) (*http.Request, error) {
 
 	payLoad, ok := token.Claims.(jwt.MapClaims)
 
@@ -120,6 +122,10 @@ func injectContext(token *jwt.Token, req *http.Request) (*http.Request, error) {
 	if ok && len(groups) > 0 {
 		req.Header.Set("X-Token-Groups", strings.Join(groups, ","))
 		usr.Groups = groups
+	}
+
+	if httpserver.Path(req.URL.Path).Matches(jenkinsAPIBase) {
+		req.SetBasicAuth(username, uToken)
 	}
 
 	//TODO extra

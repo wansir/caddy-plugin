@@ -112,6 +112,10 @@ func roleCheck(attrs authorizer.Attributes) bool {
 
 func clusterRoleCheck(attrs authorizer.Attributes) bool {
 
+	if attrs.GetResource() == "users" && attrs.GetUser().GetName() == attrs.GetName() {
+		return true
+	}
+
 	clusterRoleBindings, err := informer.ClusterRoleBindingInformer.Lister().List(labels.Everything())
 
 	if err != nil {
@@ -154,12 +158,14 @@ func verbValidate(rules []v1.PolicyRule, apiGroup string, nonResourceURL string,
 				slice.ContainsString(rule.APIGroups, v1.APIGroupAll, nil) {
 				if slice.ContainsString(rule.Verbs, verb, nil) ||
 					slice.ContainsString(rule.Verbs, v1.VerbAll, nil) {
-					if slice.ContainsString(rule.Resources, resource, nil) ||
-						slice.ContainsString(rule.Resources, v1.ResourceAll, nil) {
-						if resourceName == "" {
-							return true
-						} else if slice.ContainsString(rule.ResourceNames, resourceName, nil) ||
-							slice.ContainsString(rule.Resources, v1.ResourceAll, nil) {
+					if slice.ContainsString(rule.Resources, v1.ResourceAll, nil) {
+						return true
+					} else if slice.ContainsString(rule.Resources, resource, nil) {
+						if len(rule.ResourceNames) > 0 {
+							if slice.ContainsString(rule.ResourceNames, resourceName, nil) {
+								return true
+							}
+						} else if resourceName == "" {
 							return true
 						}
 					}
