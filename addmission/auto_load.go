@@ -1,10 +1,11 @@
 package admission
 
 import (
-	"github.com/mholt/caddy"
-	"kubesphere.io/caddy-plugin/addmission/informer"
 	"fmt"
+	"github.com/mholt/caddy"
 	"github.com/mholt/caddy/caddyhttp/httpserver"
+	"kubesphere.io/caddy-plugin/addmission/informer"
+	"strings"
 )
 
 func init() {
@@ -14,11 +15,10 @@ func init() {
 	})
 }
 
-
 // Setup is called by Caddy to parse the config block
 func Setup(c *caddy.Controller) error {
 
-	rules, err := parse(c)
+	rule, err := parse(c)
 
 	if err != nil {
 		return err
@@ -36,47 +36,63 @@ func Setup(c *caddy.Controller) error {
 	})
 
 	httpserver.GetConfig(c).AddMiddleware(func(next httpserver.Handler) httpserver.Handler {
-		return &Admission{Next: next, Rules: rules}
+		return &Admission{Next: next, Rule: rule}
 	})
 	return nil
 }
 
-func parse(c *caddy.Controller) ([]Rule, error) {
-	rules := make([]Rule, 0)
+func parse(c *caddy.Controller) (Rule, error) {
 
-	for c.Next() {
+	rule := Rule{ExceptedPath: make([]string, 0)}
+
+	if c.Next() {
 		args := c.RemainingArgs()
-		rule := Rule{}
 		switch len(args) {
-		case 1:
-			rule.Path = args[0]
+		case 0:
 			for c.NextBlock() {
 				switch c.Val() {
-				case "apiGroup":
+				case "path":
 					if !c.NextArg() {
-						return nil, c.ArgErr()
+						return rule, c.ArgErr()
 					}
-					rule.APIGroup = c.Val()
+
+					rule.Path = c.Val()
+
 					if c.NextArg() {
-						return nil, c.ArgErr()
+						return rule, c.ArgErr()
 					}
+
 					break
-				case "resource":
+				case "except":
 					if !c.NextArg() {
-						return nil, c.ArgErr()
+						return rule, c.ArgErr()
 					}
-					rule.Resource = c.Val()
+
+					rule.ExceptedPath = strings.Split(c.Val(), ",")
+
+					for i := 0; i < len(rule.ExceptedPath); i++ {
+						rule.ExceptedPath[i] = strings.TrimSpace(rule.ExceptedPath[i])
+					}
+
 					if c.NextArg() {
-						return nil, c.ArgErr()
+						return rule, c.ArgErr()
 					}
 					break
 				}
 			}
+		case 1:
+			rule.Path = args[0]
+			if c.NextBlock() {
+				return rule, c.ArgErr()
+			}
 		default:
-			return nil, c.ArgErr()
+			return rule, c.ArgErr()
 		}
-
-		rules = append(rules, rule)
 	}
-	return rules, nil
+
+	if c.Next() {
+		return rule, c.ArgErr()
+	}
+
+	return rule, nil
 }

@@ -1,16 +1,16 @@
 package auth
 
 import (
-	"net/http"
-	"github.com/mholt/caddy/caddyhttp/httpserver"
-	"fmt"
-	"strings"
-	"github.com/dgrijalva/jwt-go"
 	"errors"
-	"strconv"
-	"k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/apiserver/pkg/authentication/user"
+	"fmt"
+	"github.com/dgrijalva/jwt-go"
+	"github.com/mholt/caddy/caddyhttp/httpserver"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/endpoints/request"
+	"net/http"
+	"strconv"
+	"strings"
 )
 
 type Auth struct {
@@ -31,6 +31,9 @@ type User struct {
 }
 
 const jenkinsAPIBase = "/apis/jenkins.kubesphere.io"
+const jenkinsAPIRedirect = "/job"
+
+// TODO nonResourceRequest support
 
 var requestInfoFactory = request.RequestInfoFactory{
 	APIPrefixes:          sets.NewString("api", "apis"),
@@ -124,7 +127,7 @@ func injectContext(uToken string, token *jwt.Token, req *http.Request) (*http.Re
 		usr.Groups = groups
 	}
 
-	if httpserver.Path(req.URL.Path).Matches(jenkinsAPIBase) {
+	if httpserver.Path(req.URL.Path).Matches(jenkinsAPIBase) || httpserver.Path(req.URL.Path).Matches(jenkinsAPIRedirect) {
 		req.SetBasicAuth(username, uToken)
 	}
 

@@ -1,12 +1,12 @@
 package auth
 
 import (
+	"fmt"
+	"github.com/dgrijalva/jwt-go"
 	"github.com/mholt/caddy"
 	"github.com/mholt/caddy/caddyhttp/httpserver"
-	"fmt"
-	"strings"
 	"os"
-	"github.com/dgrijalva/jwt-go"
+	"strings"
 )
 
 const EnvSecret = "JWT_SECRET"
@@ -60,7 +60,7 @@ func parse(c *caddy.Controller) ([]Rule, error) {
 
 	for c.Next() {
 		args := c.RemainingArgs()
-		rule := Rule{}
+		rule := Rule{ExceptedPath: make([]string, 0)}
 		switch len(args) {
 		case 0:
 			for c.NextBlock() {
@@ -84,6 +84,10 @@ func parse(c *caddy.Controller) ([]Rule, error) {
 
 					rule.ExceptedPath = strings.Split(c.Val(), ",")
 
+					for i := 0; i < len(rule.ExceptedPath); i++ {
+						rule.ExceptedPath[i] = strings.TrimSpace(rule.ExceptedPath[i])
+					}
+
 					if c.NextArg() {
 						return nil, c.ArgErr()
 					}
@@ -104,5 +108,3 @@ func parse(c *caddy.Controller) ([]Rule, error) {
 	}
 	return rules, nil
 }
-
-

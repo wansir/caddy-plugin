@@ -1,85 +1,112 @@
 package admission
 
 import (
-	"net/http"
+	"fmt"
 	"github.com/mholt/caddy/caddyhttp/httpserver"
 	"k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/apiserver/pkg/endpoints/filters"
 	"k8s.io/kubernetes/pkg/util/slice"
 	"kubesphere.io/caddy-plugin/addmission/informer"
-	"fmt"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"net/http"
+	"strings"
 )
 
 type Admission struct {
-	Rules []Rule
-	Next  httpserver.Handler
+	Rule Rule
+	Next httpserver.Handler
 }
 
 type Rule struct {
-	Path     string
-	APIGroup string
-	Resource string
+	Path         string
+	ExceptedPath []string
 }
 
 func (c Admission) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 
-	attrs, err := filters.GetAuthorizerAttributes(r.Context())
+	if httpserver.Path(r.URL.Path).Matches(c.Rule.Path) {
 
-	if err == nil {
+		attrs, err := filters.GetAuthorizerAttributes(r.Context())
 
-		var attrsRecord *authorizer.AttributesRecord
-		attrsRecord = attrs.(*authorizer.AttributesRecord)
+		// without auth info
+		if err != nil {
+			return c.Next.ServeHTTP(w, r)
+		}
 
-		for _, rule := range c.Rules {
-			if httpserver.Path(r.URL.Path).Matches(rule.Path) {
-				if rule.APIGroup != "" {
-					attrsRecord.APIGroup = rule.APIGroup
-				}
-				if rule.Resource != "" {
-					attrsRecord.Resource = rule.Resource
-				}
+		for _, path := range c.Rule.ExceptedPath {
+			if httpserver.Path(r.URL.Path).Matches(path) {
+				return c.Next.ServeHTTP(w, r)
 			}
 		}
 
-		err := admit(attrs)
+		permitted, err := admissionValidate(attrs)
 
 		if err != nil {
-			return handleForbidden(w, r, err.Error()), nil
+			return http.StatusInternalServerError, err
 		}
 
+		if !permitted {
+			err = errors.NewForbidden(schema.GroupResource{Group: attrs.GetAPIGroup(), Resource: attrs.GetResource()}, attrs.GetName(), fmt.Errorf("permission undefined"))
+			return handleForbidden(w, err), nil
+		}
 	}
 
 	return c.Next.ServeHTTP(w, r)
+
 }
 
-func handleForbidden(w http.ResponseWriter, r *http.Request, reason string) int {
-	message := fmt.Sprintf("Forbidden,%s", reason)
+func handleForbidden(w http.ResponseWriter, err error) int {
+	message := fmt.Sprintf("Forbidden,%s", err.Error())
 	w.Header().Add("WWW-Authenticate", message)
 	return http.StatusForbidden
 }
 
-func admit(attrs authorizer.Attributes) error {
+func admissionValidate(attrs authorizer.Attributes) (bool, error) {
 
-	if clusterRoleCheck(attrs) {
-		return nil
+	if openAPIValidate(attrs) {
+		return true, nil
 	}
 
-	if attrs.GetNamespace() != "" && roleCheck(attrs) {
-		return nil
+	permitted, err := clusterRoleValidate(attrs)
+
+	if err != nil {
+		return false, err
 	}
 
-	return errors.NewForbidden(schema.GroupResource{Group: attrs.GetAPIGroup(), Resource: attrs.GetResource()}, attrs.GetName(), fmt.Errorf("permission undefined"))
+	if permitted {
+		return true, nil
+	}
+
+	if attrs.GetNamespace() != "" {
+		permitted, err = roleValidate(attrs)
+
+		if err != nil {
+			return false, err
+		}
+
+		if permitted {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
-func roleCheck(attrs authorizer.Attributes) bool {
+
+func roleValidate(attrs authorizer.Attributes) (bool, error) {
 
 	roleBindings, err := informer.RoleBindingInformer.Lister().RoleBindings(attrs.GetNamespace()).List(labels.Everything())
 
 	if err != nil {
-		return false
+		return false, err
+	}
+
+	fullSource := attrs.GetResource()
+
+	if attrs.GetSubresource() != "" {
+		fullSource = fullSource + "/" + attrs.GetSubresource()
 	}
 
 	for _, roleBinding := range roleBindings {
@@ -90,94 +117,187 @@ func roleCheck(attrs authorizer.Attributes) bool {
 				(subj.Kind == v1.GroupKind && slice.ContainsString(attrs.GetUser().GetGroups(), subj.Name, nil)) {
 				role, err := informer.RoleInformer.Lister().Roles(attrs.GetNamespace()).Get(roleBinding.RoleRef.Name)
 
-				// TODO exception handle
 				if err != nil {
-					continue
+					return false, err
 				}
 
-				if attrs.IsResourceRequest() {
-					if verbValidate(role.Rules, attrs.GetAPIGroup(), "", attrs.GetResource(), attrs.GetName(), attrs.GetVerb()) {
-						return true
+				for _, rule := range role.Rules {
+					if ruleMatchesRequest(rule, attrs.GetAPIGroup(), "", attrs.GetResource(), attrs.GetSubresource(), attrs.GetName(), attrs.GetVerb()) {
+						return true, nil
 					}
-				} else if verbValidate(role.Rules, attrs.GetAPIGroup(), attrs.GetPath(), "", "", attrs.GetVerb()) {
-					return true
 				}
-
 			}
 		}
+	}
+
+	return false, nil
+}
+
+func openAPIValidate(attrs authorizer.Attributes) bool {
+
+	combinedResource := attrs.GetResource()
+
+	if attrs.GetSubresource() != "" {
+		combinedResource = combinedResource + "/" + attrs.GetSubresource()
+	}
+
+	if attrs.GetPath() == "/apis/account.kubesphere.io/v1alpha1/users/current" && attrs.GetVerb() == "get" {
+		return true
+	}
+
+	if attrs.GetPath() == "/apis/kubesphere.io/v1alpha1/workspaces" && attrs.GetVerb() == "list" {
+		return true
+	}
+
+	if combinedResource == "rulesmapping" && attrs.GetVerb() == "get" {
+		return true
+	}
+
+	if combinedResource == "workspaces/rules" && attrs.GetVerb() == "get" {
+		return true
+	}
+
+	if combinedResource == "workspaces/roles" && attrs.GetVerb() == "get" {
+		return true
+	}
+
+	if combinedResource == "workspaces/namespaces" && attrs.GetVerb() == "get" {
+		return true
+	}
+
+	if combinedResource == "workspaces/devops" && attrs.GetVerb() == "get" {
+		return true
 	}
 
 	return false
 }
 
-func clusterRoleCheck(attrs authorizer.Attributes) bool {
-
-	if attrs.GetResource() == "users" && attrs.GetUser().GetName() == attrs.GetName() {
-		return true
-	}
+func clusterRoleValidate(attrs authorizer.Attributes) (bool, error) {
 
 	clusterRoleBindings, err := informer.ClusterRoleBindingInformer.Lister().List(labels.Everything())
 
 	if err != nil {
-		return false
+		return false, err
 	}
 
 	for _, clusterRoleBinding := range clusterRoleBindings {
 
-		for _, subj := range clusterRoleBinding.Subjects {
+		for _, subject := range clusterRoleBinding.Subjects {
 
-			if (subj.Kind == v1.UserKind && subj.Name == attrs.GetUser().GetName()) ||
-				(subj.Kind == v1.GroupKind && slice.ContainsString(attrs.GetUser().GetGroups(), subj.Name, nil)) {
+			if (subject.Kind == v1.UserKind && subject.Name == attrs.GetUser().GetName()) ||
+				(subject.Kind == v1.GroupKind && hasString(attrs.GetUser().GetGroups(), subject.Name)) {
+
 				clusterRole, err := informer.ClusterRoleInformer.Lister().Get(clusterRoleBinding.RoleRef.Name)
 
-				// TODO exception handle
 				if err != nil {
-					continue
+					return false, err
 				}
 
-				if attrs.IsResourceRequest() {
-					if verbValidate(clusterRole.Rules, attrs.GetAPIGroup(), "", attrs.GetResource(), attrs.GetName(), attrs.GetVerb()) {
-						return true
+				for _, rule := range clusterRole.Rules {
+					if attrs.IsResourceRequest() {
+						if ruleMatchesRequest(rule, attrs.GetAPIGroup(), "", attrs.GetResource(), attrs.GetSubresource(), attrs.GetName(), attrs.GetVerb()) {
+							return true, nil
+						}
+					} else {
+						if ruleMatchesRequest(rule, "", attrs.GetPath(), "", "", "", attrs.GetVerb()) {
+							return true, nil
+						}
 					}
-				} else if verbValidate(clusterRole.Rules, "", attrs.GetPath(), "", "", attrs.GetVerb()) {
-					return true
+
 				}
 
 			}
 		}
 	}
 
+	return false, nil
+}
+
+func ruleMatchesResources(rule v1.PolicyRule, apiGroup string, resource string, subresource string, resourceName string) bool {
+
+	if resource == "" {
+		return false
+	}
+
+	if !hasString(rule.APIGroups, apiGroup) && !hasString(rule.APIGroups, v1.ResourceAll) {
+		return false
+	}
+
+	if len(rule.ResourceNames) > 0 && !hasString(rule.ResourceNames, resourceName) {
+		return false
+	}
+
+	combinedResource := resource
+
+	if subresource != "" {
+		combinedResource = combinedResource + "/" + subresource
+	}
+
+	for _, res := range rule.Resources {
+
+		// match "*"
+		if res == v1.ResourceAll || res == combinedResource {
+			return true
+		}
+
+		// match "*/subresource"
+		if len(subresource) > 0 && strings.HasPrefix(res, "*/") && subresource == strings.TrimLeft(res, "*/") {
+			return true
+		}
+		// match "resource/*"
+		if strings.HasSuffix(res, "/*") && resource == strings.TrimRight(res, "/*") {
+			return true
+		}
+	}
+
 	return false
 }
 
-func verbValidate(rules []v1.PolicyRule, apiGroup string, nonResourceURL string, resource string, resourceName string, verb string) bool {
-	for _, rule := range rules {
+func ruleMatchesRequest(rule v1.PolicyRule, apiGroup string, nonResourceURL string, resource string, subresource string, resourceName string, verb string) bool {
 
-		if nonResourceURL == "" {
-			if slice.ContainsString(rule.APIGroups, apiGroup, nil) ||
-				slice.ContainsString(rule.APIGroups, v1.APIGroupAll, nil) {
-				if slice.ContainsString(rule.Verbs, verb, nil) ||
-					slice.ContainsString(rule.Verbs, v1.VerbAll, nil) {
-					if slice.ContainsString(rule.Resources, v1.ResourceAll, nil) {
-						return true
-					} else if slice.ContainsString(rule.Resources, resource, nil) {
-						if len(rule.ResourceNames) > 0 {
-							if slice.ContainsString(rule.ResourceNames, resourceName, nil) {
-								return true
-							}
-						} else if resourceName == "" {
-							return true
-						}
-					}
-				}
-			}
+	if !hasString(rule.Verbs, verb) && !hasString(rule.Verbs, v1.VerbAll) {
+		return false
+	}
 
-		} else if slice.ContainsString(rule.NonResourceURLs, nonResourceURL, nil) ||
-			slice.ContainsString(rule.NonResourceURLs, v1.NonResourceAll, nil) {
-			if slice.ContainsString(rule.Verbs, verb, nil) ||
-				slice.ContainsString(rule.Verbs, v1.VerbAll, nil) {
-				return true
-			}
+	if nonResourceURL == "" {
+		return ruleMatchesResources(rule, apiGroup, resource, subresource, resourceName)
+	} else {
+		return ruleMatchesNonResource(rule, nonResourceURL)
+	}
+}
+
+func ruleMatchesNonResource(rule v1.PolicyRule, nonResourceURL string) bool {
+
+	if nonResourceURL == "" {
+		return false
+	}
+
+	for _, spec := range rule.NonResourceURLs {
+		if pathMatches(nonResourceURL, spec) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func pathMatches(path, spec string) bool {
+	if spec == "*" {
+		return true
+	}
+	if spec == path {
+		return true
+	}
+	if strings.HasSuffix(spec, "*") && strings.HasPrefix(path, strings.TrimRight(spec, "*")) {
+		return true
+	}
+	return false
+}
+
+func hasString(slice []string, value string) bool {
+	for _, s := range slice {
+		if s == value {
+			return true
 		}
 	}
 	return false
